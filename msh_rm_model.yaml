@@ -1,0 +1,54 @@
+components:
+-   name: diskmodel
+    type: SkyModel
+    spectral:
+        type: PowerLawSpectralModel
+        parameters:
+        -   name: index
+            value: 2.4040818015924206
+            error: 0.07998031140600466
+        -   name: amplitude
+            value: 3.2639146127239477e-12
+            unit: TeV-1 s-1 cm-2
+            error: 3.4333599909081485e-13
+        -   name: reference
+            value: 1.4
+            unit: TeV
+    spatial:
+        type: DiskSpatialModel
+        frame: icrs
+        parameters:
+        -   name: lon_0
+            value: 228.55715042719206
+            unit: deg
+            error: 0.021454482045613225
+            min: 227.5
+            max: 229.5
+        -   name: lat_0
+            value: -59.17032074344255
+            unit: deg
+            error: 0.0064871376917203715
+            min: -60.5
+            max: -58.0
+        -   name: r_0
+            value: 0.16916290644496668
+            unit: deg
+            error: 0.004754549260092293
+        -   name: e
+            value: 0.7647748278647715
+            error: 0.033955236338625495
+            frozen: false
+        -   name: phi
+            value: 148.76509571935313
+            unit: deg
+            error: 7.793424115386445
+            min: 0.0
+            max: 360.0
+            frozen: false
+        -   name: edge_width
+            value: 0.01
+covariance: msh_rm_model_covariance.dat
+metadata:
+    creator: Gammapy 1.2
+    date: '2024-09-04T11:40:25.855313'
+    origin: null
