@@ -25,14 +25,14 @@ import common_utils
 from common_utils import get_excluded_regions
 
 #load the auxiliary information of the runs
-DB_general = pd.read_csv('/home/wecapstor1/caph/shared/hess/fits/database_image/data_1223.csv', header=0)
+DB_general = pd.read_csv('/home/wecapstor1/caph/shared/hess/fits/database_image/data_0924.csv', header=0, delimiter='\t')
 
 # load the zenith correction factors
 correction_factor = pd.read_csv('/home/wecapstor1/caph/mppi103h/On-Off-matching/zenith_correction_factors.csv', sep='\t')
 
 #specific optical phases for the background template of the HESS telescopes
 muon_phases2 = [20000, 40093, 57532, 60838, 63567, 68545, 80000, 85000, 95003,
-                100800, 110340, 127700, 128600, 132350, 154814, 180000]
+                100800, 110340, 127700, 128600, 132350, 154814, 190000]
 
 
 
@@ -55,10 +55,12 @@ class matching_dataset():
     
         - offset_max: float, maximum event offset from the center of the camera
 
+        - ds2: In case your ON and OFF runs are within two different folders, pass the OFF run folder with this parameter
+
     """
 
 
-    def __init__(self, systematic_shift, ds, obs_list, obs_list_off, deviation, geom, energy_axis_true, offset_max):
+    def __init__(self, ds, obs_list, obs_list_off, deviation, geom, energy_axis_true, offset_max, ds2 = False, systematic_shift=False):
         
         self.ds = ds
         self.obs_list = obs_list
@@ -68,6 +70,7 @@ class matching_dataset():
         self.energy_axis_true = energy_axis_true
         self.offset_max = offset_max
         self.systematic_shift = systematic_shift
+        self.ds2 = ds2
         
 
     
@@ -93,7 +96,7 @@ class matching_dataset():
                 factor = correction_factor.x_2.iloc[phase]
     
         bkg = dataset.background.data
-        zenith_off = np.deg2rad(self.ds.obs_table[self.ds.obs_table['OBS_ID']==off_run.obs_id]["ZEN_PNT"])
+        zenith_off = np.deg2rad(self.ds2.obs_table[self.ds2.obs_table['OBS_ID']==off_run.obs_id]["ZEN_PNT"])
         zenith_on = np.deg2rad(self.ds.obs_table[self.ds.obs_table['OBS_ID']==obs.obs_id]["ZEN_PNT"])
         bkg = np.array(bkg) * np.cos(zenith_on - zenith_off)**factor
         
@@ -187,6 +190,41 @@ class matching_dataset():
         )
         
         return stacked
+
+    def mask_energy_bkg_peak_lowE(self, dataset, irfs, observation=None):
+        """Make safe energy mask based on the binned background.
+
+        The energy threshold is defined as the lower edge of the energy
+        bin with the highest predicted background rate. This function is a temporary fix until we fix the high energy end of the bkg template model
+
+        Parameters
+        ----------
+        dataset : `~gammapy.datasets.MapDataset` or `~gammapy.datasets.SpectrumDataset`
+            Dataset to compute mask for.
+        observation: `~gammapy.data.Observation`
+            Observation to compute mask for. It is a mandatory argument when DL3 irfs are used.
+
+
+        Returns
+        -------
+        mask_safe : `~numpy.ndarray`
+            Safe data range mask.
+        """
+        geom = dataset._geom
+        if irfs == "DL3":
+            bkg = observation.bkg.to_2d()
+            background_spectrum = np.ravel(
+                bkg.integral(axis_name="offset", offset=bkg.axes["offset"].bounds[1])
+            )
+            energy_axis = bkg.axes["energy"]
+        else:
+            background_spectrum = dataset.npred_background().get_spectrum()
+            energy_axis = geom.axes["energy"]
+
+        idx = np.argmax(background_spectrum.data[0:16], axis=0)
+        # print(idx)
+        # print(energy_axis.edges[idx])
+        return geom.energy_mask(energy_min=energy_axis.edges[idx])
     
     
     def compute_matched_dataset(self, corrections=None, systematics=None, debug=0):
@@ -210,7 +248,7 @@ class matching_dataset():
         maker = MapDatasetMaker()
         maker_fov = FoVBackgroundMaker(method="fit")
         maker_safe_mask2 = SafeMaskMaker(
-            methods=["offset-max", 'aeff-default', 'aeff-max', 'edisp-bias', 'bkg-peak'],
+            methods=["offset-max", 'edisp-bias'],
             offset_max=self.offset_max,
             bias_percent=10
         )
@@ -228,6 +266,8 @@ class matching_dataset():
             )
             dataset = maker.run(cutout, obs)
             dataset = maker_safe_mask2.run(dataset, obs)   
+            bkg_thres = self.mask_energy_bkg_peak_lowE(dataset, irfs='DL4')
+            dataset.mask_safe = dataset.mask_safe * bkg_thres
         
             number_on = self.find_energy_threshold(dataset)
 
@@ -253,6 +293,9 @@ class matching_dataset():
             #fit the background to the OFF run
             dataset_off = maker.run(cutout_off, off_run)
             dataset_off = maker_safe_mask2.run(dataset_off, off_run)
+            bkg_thres_off = self.mask_energy_bkg_peak_lowE(dataset_off, irfs='DL4')
+            dataset_off.mask_safe = dataset_off.mask_safe * bkg_thres_off
+            
             
             number_off = self.find_energy_threshold(dataset_off)
 
@@ -298,22 +341,48 @@ class matching_dataset():
                 dataset = self.systematics(obs, off_run, dataset, sys='high')
 
             
-            print(obs.obs_id)
+            #print(obs.obs_id)
             #print(off_run.obs_id)
 
+            #Significance of the model:
+            estimator_001 = ExcessMapEstimator(
+            correlation_radius="0.1 deg",
+            # energy_edges=[1, 100] * u.TeV,
+            selection_optional=[],)
+            lima_maps_001 = estimator_001.run(dataset)
+      
+            bins=np.linspace(-6, 8, 131)
+            significance_map_off = lima_maps_001["sqrt_ts"]
+            significance_off = significance_map_off.data[np.isfinite(significance_map_off.data)]
+            significance_all = significance_map_off.data[np.isfinite(significance_map_off.data)]
+            significance_data = significance_off
+
             if debug==1:
-                #Significance of the model:
-                estimator_001 = ExcessMapEstimator(
-                correlation_radius="0.1 deg",
-                # energy_edges=[0.3, 100] * u.TeV,
-                selection_optional=[],)
-                lima_maps_001 = estimator_001.run(dataset)
-          
-                bins=np.linspace(-6, 8, 131)
-                significance_map_off = lima_maps_001["sqrt_ts"]
-                significance_off = significance_map_off.data[np.isfinite(significance_map_off.data)]
-                significance_all = significance_map_off.data[np.isfinite(significance_map_off.data)]
-                significance_data = significance_off
+                mu, std = norm.fit(significance_data)
+                sig_dist.append([obs.obs_id, off_run.obs_id, mu])
+
+            if debug==3:
+                hap_exclusion_regions = get_excluded_regions(dataset_off.counts.geom.center_coord[0].value, 
+                                                             dataset_off.counts.geom.center_coord[1].value, 
+                                                             3)
+                excl_regions = []
+                for source in hap_exclusion_regions:
+                    center = SkyCoord(source.ra, source.dec, unit='deg', frame='icrs')
+                    excl_regions.append(CircleSkyRegion(center=center, radius=source.radius*u.deg))
+                    data2 = dataset_off.counts.geom.region_mask(regions=excl_regions, inside=False)
+                                
+                tot_off_counts = np.nansum(dataset_off.counts.data*dataset.mask_safe*data2)
+                hap_exclusion_regions = get_excluded_regions(dataset.counts.geom.center_coord[0].value, 
+                                                             dataset.counts.geom.center_coord[1].value, 
+                                                             3)
+                excl_regions = []
+                for source in hap_exclusion_regions:
+                    center = SkyCoord(source.ra, source.dec, unit='deg', frame='icrs')
+                    excl_regions.append(CircleSkyRegion(center=center, radius=source.radius*u.deg))
+                    data2 = dataset.counts.geom.region_mask(regions=excl_regions, inside=False)
+                
+                tot_on_counts = np.nansum(dataset.counts.data*dataset.mask_safe*data2)
+
                 mu, std = norm.fit(significance_data)
                 sig_dist.append([obs.obs_id, off_run.obs_id, mu])
         
@@ -324,11 +393,14 @@ class matching_dataset():
                 stacked_dataset.counts.get_spectrum().plot()
                 stacked_dataset.background.get_spectrum().plot()
                 plt.show()
+
         
         if debug == 0 or debug==2:
             return stacked_dataset
         if debug == 1:
             return stacked_dataset, sig_dist
+        if debug == 3:
+            return stacked_dataset, sig_dist, tot_off_counts, tot_on_counts
 
 
 
@@ -348,13 +420,13 @@ class matching_dataset():
         sig_dist = []
         maker = MapDatasetMaker()
         maker_safe_mask = SafeMaskMaker(
-            methods=["offset-max", 'aeff-default', 'aeff-max', 'edisp-bias', "bkg-peak"],
+            methods=["offset-max", 'edisp-bias'],
             offset_max= self.offset_max,
             bias_percent=10
         )
         
         for obs in self.obs_list:
-            
+            # print(obs)
             cutout = stacked_dataset.cutout(
                 obs.pointing.fixed_icrs,
                 width=2 * self.offset_max,
@@ -365,7 +437,9 @@ class matching_dataset():
     
             
             dataset = maker.run(cutout, obs)
-            dataset = maker_safe_mask.run(dataset, obs)   
+            dataset = maker_safe_mask.run(dataset, obs)     
+            bkg_thres = self.mask_energy_bkg_peak_lowE(dataset, irfs='DL4')
+            dataset.mask_safe = dataset.mask_safe * bkg_thres
             
             # fit background model
             bkg_model = FoVBackgroundModel(dataset_name=dataset.name)
@@ -712,6 +786,35 @@ def plot_significance_histograms(ax, bins, data_list, colors, colors_fit, labels
     ax.set_ylabel('Counts')
     ax.set_xlabel('Significance')
     ax.set_yscale('log')
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
